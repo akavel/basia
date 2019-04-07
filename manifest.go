@@ -12,6 +12,16 @@ import (
 type Manifest map[string]Attributes
 type Attributes []string
 
+func (as Attributes) Without(key string) Attributes {
+	key = key + ": "
+	for i, v := range as {
+		if strings.HasPrefix(v, key) {
+			return append(as[:i:i], as[i+1:]...)
+		}
+	}
+	return as
+}
+
 func ParseManifest(r io.Reader) (Manifest, error) {
 	const namePrefix = "Name: "
 	m := Manifest{}
@@ -41,13 +51,13 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 
 func (m Manifest) WriteTo(w io.Writer) (n int64, err error) {
 	write := func(s string) {
-		if err != nil {
+		if err == nil {
 			wn, werr := w.Write([]byte(s))
-			n, err = n+wn, werr
+			n, err = n+int64(wn), werr
 		}
 	}
 	for _, attr := range m[""] {
-		write(attr + "\n")
+		write(attr + "\r\n")
 	}
 	if err != nil {
 		return
@@ -63,15 +73,28 @@ func (m Manifest) WriteTo(w io.Writer) (n int64, err error) {
 	}
 	// Print the sorted per-file sections of the manifest
 	for _, name := range names {
-		// FIXME: verify that name has no '\n', etc.
-		write("\nName: " + name + "\n")
-		for _, attr := range m[name] {
-			// TODO: handle advanced base64-encoded attributes correctly
-			write(attr + "\n")
-		}
+		write("\r\n")
+		wn, werr := m.WriteEntry(w, name)
+		n, err = n+wn, werr
 		if err != nil {
 			return
 		}
+	}
+	return
+}
+
+func (m Manifest) WriteEntry(w io.Writer, name string) (n int64, err error) {
+	write := func(s string) {
+		if err == nil {
+			wn, werr := w.Write([]byte(s))
+			n, err = n+int64(wn), werr
+		}
+	}
+	// FIXME: verify that name has no '\n', etc.
+	write("Name: " + name + "\r\n")
+	for _, attr := range m[name] {
+		// TODO: handle advanced base64-encoded attributes correctly
+		write(attr + "\r\n")
 	}
 	return
 }
