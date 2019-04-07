@@ -1,12 +1,10 @@
 apksigner
 =========
-A lightweight APK signing tool that can be run on Android devices.
-
-It is available as a package in [Termux](https://termux.com) which can be installed with `pkg install apksigner`.
+A lightweight APK signing tool that does not require Android Studio or JRE.
 
 Usage
 =====
-Run as `apksigner [-p password] keystore input-apk output-apk`. This will use the specified keystore (or creating one if necessary) to create a signed and zipaligned output file.
+Run as `apksigner [-p password] -k keystore -i input.apk -o output.apk`. This will use the specified keystore (or creating one if necessary) to create a signed and zipaligned output file.
 
 License
 =======
