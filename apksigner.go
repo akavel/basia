@@ -16,23 +16,57 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"flag"
-	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"sort"
+
+	"golang.org/x/exp/errors/fmt"
+
+	"go.mozilla.org/pkcs7"
 )
 
 var (
-	infile  = flag.String("i", "", "input unsigned zip `archive`")
-	outfile = flag.String("o", "", "name of signed output zip `archive` to create")
+	infile   = flag.String("i", "unsigned.apk", "input unsigned zip `archive`")
+	outfile  = flag.String("o", "signed.apk", "name of signed output zip `archive` to create")
+	keyfile  = flag.String("k", "key.pk8", "private key for signing, in PKCS#8 format")
+	certfile = flag.String("c", "key.x509.pem", "certificate for signing")
 )
 
 func main() {
 	// USAGE: apksigner -i old.zip -o new-signed.zip
 	flag.Parse()
+
+	// Open signing key/cert files
+	rawKey, err := ioutil.ReadFile(*keyfile)
+	if err != nil {
+		die(err)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(rawKey)
+	if err != nil {
+		die(fmt.Errorf("parsing PKCS8: %s: %w", *keyfile, err))
+	}
+	certPEM, err := ioutil.ReadFile(*certfile)
+	if err != nil {
+		die(err)
+	}
+	certBlock, _ := pem.Decode(certPEM)
+	if x509.IsEncryptedPEMBlock(certBlock) {
+		die(fmt.Errorf("%s: encrypted certificates currently not supported", *certfile))
+	}
+	cert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		die(err)
+	}
 
 	// Open infile & outfile zips
 	zr, err := zip.OpenReader(*infile)
@@ -60,7 +94,7 @@ func main() {
 
 	// TODO(akavel): normalize paths in r
 
-	err = signZip(&zr.Reader, zw)
+	err = signZip(&zr.Reader, zw, cert, key)
 	if err != nil {
 		die(err)
 	}
@@ -77,7 +111,7 @@ const (
 	pathCertRsa  = "META-INF/CERT.RSA"
 )
 
-func signZip(r *zip.Reader, w *zip.Writer) error {
+func signZip(r *zip.Reader, w *zip.Writer, cert *x509.Certificate, privkey crypto.PrivateKey) error {
 	// Copy main section of manifest from old zip, or create new one if absent.
 	oldManifest, err := getOrInitManifest(r)
 	if err != nil {
@@ -118,12 +152,43 @@ func signZip(r *zip.Reader, w *zip.Writer) error {
 		return err
 	}
 
-	// Generate signature file
+	// Generate signature file, and prepare it for signing
+	buf := bytes.NewBuffer(nil)
 	packed, err = w.Create(pathCertSf)
 	if err != nil {
 		return err
 	}
-	err = writeSignatureFile(packed, manifest, r.File)
+	err = writeSignatureFile(io.MultiWriter(packed, buf), manifest, r.File)
+	if err != nil {
+		return err
+	}
+
+	// Sign the signature file
+	sign, err := pkcs7.NewSignedData(buf.Bytes())
+	if err != nil {
+		return err
+	}
+	err = sign.AddSigner(cert, privkey, pkcs7.SignerInfoConfig{})
+	if err != nil {
+		return err
+	}
+	sign.Detach()
+	signature, err := sign.Finish()
+	if err != nil {
+		return err
+	}
+	switch privkey.(type) {
+	case *ecdsa.PrivateKey:
+		packed, err = w.Create("META-INF/CERT.EC")
+	case *rsa.PrivateKey:
+		packed, err = w.Create("META-INF/CERT.RSA")
+	default:
+		return fmt.Errorf("TODO: unhandled type of private key: %T", privkey)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = packed.Write(signature)
 	if err != nil {
 		return err
 	}
