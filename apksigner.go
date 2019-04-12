@@ -266,6 +266,7 @@ func isSpecialIgnored(name string) bool {
 }
 
 func writeSignatureFile(w io.Writer, manifest Manifest, sortedFiles []*zip.File) (err error) {
+	w = &wrap72{Writer: w}
 	write := func(s string) {
 		if err == nil {
 			_, err = w.Write([]byte(s))
