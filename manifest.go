@@ -94,6 +94,9 @@ func (m Manifest) WriteTo(w io.Writer) (n int64, err error) {
 			return
 		}
 	}
+	// HACK: for now, adding extra newline for easier comparison with one real
+	// .apk file; try to remove it in future if OK
+	write("\r\n")
 	return
 }
 
