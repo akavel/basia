@@ -44,7 +44,8 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 	m := Manifest{}
 	k, v := "", Attributes{}
 	// TODO: handle advanced base64-encoded attributes correctly
-	scan := bufio.NewScanner(r)
+	scan := bufio.NewScanner(
+		io.MultiReader(r, strings.NewReader("\r\n\r\n")))
 	for scan.Scan() {
 		line := scan.Text()
 		switch {
