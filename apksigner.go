@@ -192,6 +192,32 @@ func signZip(r *zip.Reader, w *zip.Writer, cert *x509.Certificate, privkey crypt
 	if err != nil {
 		return err
 	}
+
+	// Copy all remaining files
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() || isSpecialIgnored(f.Name) {
+			continue
+		}
+		packed, err = w.CreateHeader(&zip.FileHeader{
+			Name:    f.Name,
+			Method:  zip.Deflate,
+			Comment: f.Comment,
+			Extra:   f.Extra,
+			// Below fields are used to represent filesystem attributes, e.g. executable bit
+			CreatorVersion: f.CreatorVersion,
+			ExternalAttrs:  f.ExternalAttrs,
+			// TODO: do we also need .ReaderVersion and .Flags for some reason?
+		})
+		contents, err := f.Open()
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(packed, contents)
+		if err != nil {
+			return fmt.Errorf("cannot copy file %q to output archive: %w", f.Name, err)
+		}
+		contents.Close()
+	}
 	return nil
 }
 
