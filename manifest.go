@@ -57,6 +57,13 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 			}
 		case strings.HasPrefix(line, namePrefix):
 			k = line[len(namePrefix):]
+		case strings.HasPrefix(line, " "):
+			if len(v) == 0 {
+				k += line[1:]
+			} else {
+				// TODO: optimize (?)
+				v[len(v)-1] += line[1:]
+			}
 		default:
 			v = append(v, line)
 		}
