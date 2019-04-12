@@ -16,6 +16,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"sort"
 	"strings"
@@ -75,6 +76,7 @@ func ParseManifest(r io.Reader) (Manifest, error) {
 }
 
 func (m Manifest) WriteTo(w io.Writer) (n int64, err error) {
+	w = &wrap72{Writer: w}
 	write := func(s string) {
 		if err == nil {
 			wn, werr := w.Write([]byte(s))
@@ -112,6 +114,7 @@ func (m Manifest) WriteTo(w io.Writer) (n int64, err error) {
 }
 
 func (m Manifest) WriteEntry(w io.Writer, name string) (n int64, err error) {
+	w = &wrap72{Writer: w}
 	write := func(s string) {
 		if err == nil {
 			wn, werr := w.Write([]byte(s))
@@ -123,6 +126,57 @@ func (m Manifest) WriteEntry(w io.Writer, name string) (n int64, err error) {
 	for _, attr := range m[name] {
 		// TODO: handle advanced base64-encoded attributes correctly
 		write(attr + "\r\n")
+	}
+	return
+}
+
+// wrap72 writes to Writer, splitting any lines exceeding 72 bytes (including
+// the terminating "\r\n"). Continuation of a split line is marked with a
+// single space " " prefix.
+type wrap72 struct {
+	io.Writer
+	n int
+}
+
+func (w *wrap72) Write(buf []byte) (n int, err error) {
+	const max = 70
+	for len(buf) > 0 {
+		i := bytes.IndexAny(buf, "\r\n")
+		if i == 0 {
+			// Newline characters (CR/LF) are safe to write
+			for i < len(buf) && (buf[i] == '\r' || buf[i] == '\n') {
+				i++
+			}
+			wn, werr := w.Writer.Write(buf[:i])
+			n += wn
+			if werr != nil {
+				return n, werr
+			}
+			w.n = 0
+			buf = buf[i:]
+			continue
+		}
+		if i == -1 {
+			i = len(buf)
+		}
+		if w.n == max {
+			_, werr := w.Writer.Write([]byte("\r\n "))
+			if werr != nil {
+				return n, werr
+			}
+			w.n = 1
+		}
+		// If line exceeds max length (not counting final CR/LF), split it
+		if w.n+i > 70 {
+			i = 70 - w.n
+		}
+		wn, werr := w.Writer.Write(buf[:i])
+		n += wn
+		if werr != nil {
+			return n, werr
+		}
+		w.n += i
+		buf = buf[i:]
 	}
 	return
 }
