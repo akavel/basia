@@ -28,7 +28,9 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"path"
 	"sort"
+	"strings"
 
 	"golang.org/x/exp/errors/fmt"
 
@@ -125,9 +127,7 @@ func signZip(r *zip.Reader, w *zip.Writer, cert *x509.Certificate, privkey crypt
 		return r.File[i].Name < r.File[j].Name
 	})
 	for _, f := range r.File {
-		if f.FileInfo().IsDir() || oneOf(f.Name, pathManifest, pathCertSf, pathCertRsa) {
-			// TODO: also ignore META-INF/{*.SF,*.DSA,*.RSA,SIG-*} per below link ?
-			// https://docs.oracle.com/javase/7/docs/technotes/guides/jar/jar.html#Signed_JAR_File
+		if f.FileInfo().IsDir() || isSpecialIgnored(f.Name) {
 			continue
 		}
 		contents, err := f.Open()
@@ -215,6 +215,30 @@ func getOrInitManifest(r *zip.Reader) (Manifest, error) {
 	return ParseManifest(fr)
 }
 
+// isSpecialIgnored returns true if name is one of the special paths that
+// should not be taken into account when calculating a hash/signature of an
+// .apk file. Coincidentally, those same files also should not be copied
+// verbatim to the output .apk file.
+func isSpecialIgnored(name string) bool {
+	if !strings.HasPrefix(name, "META-INF/") {
+		return false // small optimization
+	}
+	match := func(pattern, name string) bool {
+		m, err := path.Match(pattern, name)
+		if err != nil {
+			panic(err)
+		}
+		return m
+	}
+	// https://docs.oracle.com/javase/7/docs/technotes/guides/jar/jar.html#Signed_JAR_File
+	return name == pathManifest ||
+		match("META-INF/*.SF", name) ||
+		match("META-INF/*.RSA", name) ||
+		match("META-INF/*.DSA", name) ||
+		match("META-INF/*.EC", name) || // *.EC observed in ECDSA-signed .apk files
+		match("META-INF/SIG-*", name)
+}
+
 func writeSignatureFile(w io.Writer, manifest Manifest, sortedFiles []*zip.File) (err error) {
 	write := func(s string) {
 		if err == nil {
@@ -265,16 +289,6 @@ func zipFind(r *zip.Reader, name string) *zip.File {
 		}
 	}
 	return nil
-}
-
-// oneOf returns true if needle is equal to one of the strings from haystack.
-func oneOf(needle string, haystack ...string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func sha1sum(r io.Reader) (sum [sha1.Size]byte, err error) {
