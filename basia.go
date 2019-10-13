@@ -54,8 +54,8 @@ func main() {
 		if info.IsDir() {
 			return nil
 		}
-		fmt.Println(path)
 		relpath := filepath.ToSlash(strings.TrimLeft(strings.TrimPrefix(path, *input), `/\`))
+		fmt.Println("#", relpath)
 		switch relpath {
 		case "META-INF/MANIFEST.MF", "meta-inf/manifest.mf":
 			die(fmt.Errorf("modifying existing META-INF/MANIFEST.MF file not yet implemented"))
@@ -121,12 +121,14 @@ func main() {
 		{"META-INF/MANIFEST.MF", manifestMf},
 		{"META-INF/CERT.SF", certSf},
 		{signedName, string(signed)}} {
+		fmt.Println("+", f.name)
 		fh, err := zw.Create(f.name)
 		check(err)
 		_, err = fh.Write([]byte(f.data))
 		check(err)
 	}
 	for _, f := range files {
+		fmt.Println("+", f.name)
 		fh, err := os.Open(filepath.Join(*input, f.name))
 		check(err)
 		fi, err := fh.Stat()
