@@ -54,7 +54,9 @@ func main() {
 		if info.IsDir() {
 			return nil
 		}
-		relpath := filepath.ToSlash(strings.TrimLeft(strings.TrimPrefix(path, *input), `/\`))
+		relpath, err := filepath.Rel(*input, path)
+		check(err)
+		relpath = filepath.ToSlash(relpath)
 		fmt.Println("#", relpath)
 		switch relpath {
 		case "META-INF/MANIFEST.MF", "meta-inf/manifest.mf":
