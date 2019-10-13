@@ -1,22 +1,7 @@
-// Copyright 2014-2019 apksigner Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
 	"archive/zip"
-	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -25,226 +10,185 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
-
-	"golang.org/x/exp/errors/fmt"
+	"time"
 
 	"go.mozilla.org/pkcs7"
 )
 
 var (
-	infile   = flag.String("i", "unsigned.apk", "input unsigned zip `archive`")
-	outfile  = flag.String("o", "signed.apk", "name of signed output zip `archive` to create")
+	input    = flag.String("i", "", "path to `directory` containing files to put in an .apk")
+	output   = flag.String("o", "", "path to `.apk` file to create")
+	certfile = flag.String("c", "cert.x509.pem", "certificate for signing")
 	keyfile  = flag.String("k", "key.pk8", "private key for signing, in PKCS#8 format")
-	certfile = flag.String("c", "key.x509.pem", "certificate for signing")
 )
 
 func main() {
-	// USAGE: apksigner -i old.zip -o new-signed.zip
+	// TODO: usage info
 	flag.Parse()
 
-	// Open signing key/cert files
-	rawKey, err := ioutil.ReadFile(*keyfile)
-	if err != nil {
-		die(err)
+	cert, key, err := loadCertAndKey(*certfile, *keyfile)
+	check(err)
+
+	// Open output .zip - early, to quickly verify if we have write permissions
+	w, err := os.Create(*output)
+	check(err)
+	defer func() { check(w.Close()) }()
+	zw := zip.NewWriter(w)
+	defer func() { check(zw.Close()) }()
+
+	// Collect names & hashes of files from input directory
+	type file struct{ name, data string }
+	files := []file{}
+	check(filepath.Walk(*input, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		fmt.Println(path)
+		relpath := filepath.ToSlash(strings.TrimLeft(strings.TrimPrefix(path, *input), `/\`))
+		switch relpath {
+		case "META-INF/MANIFEST.MF", "meta-inf/manifest.mf":
+			die(fmt.Errorf("modifying existing META-INF/MANIFEST.MF file not yet implemented"))
+		}
+		f, err := os.Open(path)
+		check(err)
+		hash, err := sha1sum(f)
+		check(err)
+		f.Close()
+		files = append(files, file{relpath, base64enc(hash[:])})
+		return nil
+	}))
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].name < files[j].name
+	})
+
+	// Build MANIFEST.MF
+	manifestMf := joinBlock(
+		"Manifest-Version: 1.0",
+		"Built-By: Generated-by-ADT",
+		"Created-By: Android Gradle 3.3.2")
+	for i, f := range files {
+		if isSpecialIgnored(f.name) {
+			continue
+		}
+		entry := joinBlock(
+			"Name: "+f.name,
+			// Note: using SHA1 (not SHA256) to support old Android devices (https://stackoverflow.com/a/34875983/98528)
+			"SHA1-Digest: "+f.data)
+		manifestMf += entry
+		files[i].data = entry // will be needed in CERT.SF
 	}
-	key, err := x509.ParsePKCS8PrivateKey(rawKey)
-	if err != nil {
-		die(fmt.Errorf("parsing PKCS8: %s: %w", *keyfile, err))
+
+	// Build CERT.SF
+	certSf := joinBlock(
+		"Signature-Version: 1.0",
+		"Created-By: 1.0 (Android)",
+		"SHA1-Digest-Manifest: "+base64sha1(manifestMf))
+	for _, f := range files {
+		if isSpecialIgnored(f.name) {
+			continue
+		}
+		certSf += joinBlock(
+			"Name: "+f.name,
+			"SHA1-Digest: "+base64sha1(f.data))
 	}
-	certPEM, err := ioutil.ReadFile(*certfile)
+
+	// Calculate CERT.RSA or CERT.EC
+	signed, err := sign([]byte(certSf), cert, key)
+	check(err)
+	signedName := ""
+	switch key.(type) {
+	case *ecdsa.PrivateKey:
+		signedName = "META-INF/CERT.EC"
+	case *rsa.PrivateKey:
+		signedName = "META-INF/CERT.RSA"
+	default:
+		die(fmt.Errorf("TODO: unhandled type of private key: %T", key))
+	}
+
+	// Write result
+	for _, f := range []file{
+		{"META-INF/MANIFEST.MF", manifestMf},
+		{"META-INF/CERT.SF", certSf},
+		{signedName, string(signed)}} {
+		fh, err := zw.Create(f.name)
+		check(err)
+		_, err = fh.Write([]byte(f.data))
+		check(err)
+	}
+	for _, f := range files {
+		fh, err := os.Open(filepath.Join(*input, f.name))
+		check(err)
+		fi, err := fh.Stat()
+		check(err)
+		zi, err := zip.FileInfoHeader(fi)
+		check(err)
+		zi.Name = f.name
+		zi.Method = zip.Deflate
+		zi.Modified, zi.ModifiedDate, zi.ModifiedTime = time.Time{}, 0, 0
+		zh, err := zw.CreateHeader(zi)
+		check(err)
+		_, err = io.Copy(zh, fh)
+		check(err)
+		fh.Close()
+	}
+}
+
+func loadCertAndKey(certfile, keyfile string) (*x509.Certificate, crypto.PrivateKey, error) {
+	certPEM, err := ioutil.ReadFile(certfile)
 	if err != nil {
-		die(err)
+		return nil, nil, err
 	}
 	certBlock, _ := pem.Decode(certPEM)
 	if x509.IsEncryptedPEMBlock(certBlock) {
-		die(fmt.Errorf("%s: encrypted certificates currently not supported", *certfile))
+		return nil, nil, fmt.Errorf("%s: encrypted certificates currently not supported", certfile)
 	}
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
-		die(err)
+		return nil, nil, fmt.Errorf("%s: %s", certfile, err)
 	}
 
-	// Open infile & outfile zips
-	zr, err := zip.OpenReader(*infile)
+	rawKey, err := ioutil.ReadFile(keyfile)
 	if err != nil {
-		die(err)
+		return nil, nil, err
 	}
-	defer zr.Close()
-	w, err := os.Create(*outfile)
+	key, err := x509.ParsePKCS8PrivateKey(rawKey)
 	if err != nil {
-		die(err)
+		return nil, nil, fmt.Errorf("%s: %s", keyfile, err)
+		// die(fmt.Errorf("parsing PKCS8: %s: %w", keyfile, err))
 	}
-	defer func() {
-		err := w.Close()
-		if err != nil {
-			die(err)
-		}
-	}()
-	zw := zip.NewWriter(w)
-	defer func() {
-		err := zw.Close()
-		if err != nil {
-			die(err)
-		}
-	}()
 
-	// TODO(akavel): normalize paths in r
-
-	err = signZip(&zr.Reader, zw, cert, key)
-	if err != nil {
-		die(err)
-	}
+	return cert, key, nil
 }
 
-func die(err error) {
-	fmt.Fprintln(os.Stderr, "error:", err)
-	os.Exit(1)
+func joinBlock(lines ...string) (block string) {
+	for _, l := range lines {
+		block += wrap70(l) + "\r\n"
+	}
+	block += "\r\n"
+	return
+}
+func wrap70(s string) (wrapped string) {
+	max := 70
+	for len(s) > max {
+		wrapped += s[:max] + "\r\n "
+		s = s[max:]
+		max = 69
+	}
+	wrapped += s
+	return
 }
 
-const (
-	pathManifest = "META-INF/MANIFEST.MF"
-	pathCertSf   = "META-INF/CERT.SF"
-	pathCertRsa  = "META-INF/CERT.RSA"
-)
-
-func signZip(r *zip.Reader, w *zip.Writer, cert *x509.Certificate, privkey crypto.PrivateKey) error {
-	// Copy main section of manifest from old zip, or create new one if absent.
-	oldManifest, err := getOrInitManifest(r)
-	if err != nil {
-		return err
-	}
-	manifest := Manifest{"": oldManifest[""]}
-
-	// Calculate digests of all files in the zip (sorted, for determinism),
-	// adding them to the manifest.
-	sort.Slice(r.File, func(i, j int) bool {
-		return r.File[i].Name < r.File[j].Name
-	})
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() || isSpecialIgnored(f.Name) {
-			continue
-		}
-		contents, err := f.Open()
-		if err != nil {
-			return err
-		}
-		hash, err := sha1sum(contents)
-		if err != nil {
-			return err
-		}
-		manifest[f.Name] = append(
-			oldManifest[f.Name].Without("SHA1-Digest"),
-			"SHA1-Digest: "+base64enc(hash[:]))
-	}
-	// Write the manifest file to the output zip archive.
-	packed, err := w.Create(pathManifest)
-	if err != nil {
-		return err
-	}
-	_, err = manifest.WriteTo(packed)
-	if err != nil {
-		return err
-	}
-
-	// Generate signature file, and prepare it for signing
-	buf := bytes.NewBuffer(nil)
-	packed, err = w.Create(pathCertSf)
-	if err != nil {
-		return err
-	}
-	err = writeSignatureFile(io.MultiWriter(packed, buf), manifest, r.File)
-	if err != nil {
-		return err
-	}
-
-	// Sign the signature file
-	sign, err := pkcs7.NewSignedData(buf.Bytes())
-	if err != nil {
-		return err
-	}
-	err = sign.AddSigner(cert, privkey, pkcs7.SignerInfoConfig{})
-	if err != nil {
-		return err
-	}
-	sign.Detach()
-	signature, err := sign.Finish()
-	if err != nil {
-		return err
-	}
-	switch privkey.(type) {
-	case *ecdsa.PrivateKey:
-		packed, err = w.Create("META-INF/CERT.EC")
-	case *rsa.PrivateKey:
-		packed, err = w.Create("META-INF/CERT.RSA")
-	default:
-		return fmt.Errorf("TODO: unhandled type of private key: %T", privkey)
-	}
-	if err != nil {
-		return err
-	}
-	_, err = packed.Write(signature)
-	if err != nil {
-		return err
-	}
-
-	// Copy all remaining files
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() || isSpecialIgnored(f.Name) {
-			continue
-		}
-		packed, err = w.CreateHeader(&zip.FileHeader{
-			Name:    f.Name,
-			Method:  zip.Deflate,
-			Comment: f.Comment,
-			Extra:   f.Extra,
-			// Below fields are used to represent filesystem attributes, e.g. executable bit
-			CreatorVersion: f.CreatorVersion,
-			ExternalAttrs:  f.ExternalAttrs,
-			// TODO: do we also need .ReaderVersion and .Flags for some reason?
-		})
-		contents, err := f.Open()
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(packed, contents)
-		if err != nil {
-			return fmt.Errorf("cannot copy file %q to output archive: %w", f.Name, err)
-		}
-		contents.Close()
-	}
-	return nil
-}
-
-// getOrInitManifest returns a parsed META-INF/MANIFEST.MF file from r, or a
-// new Manifest with initialized main section if not found.
-func getOrInitManifest(r *zip.Reader) (Manifest, error) {
-	rawManifest := zipFind(r, pathManifest)
-	if rawManifest == nil {
-		return Manifest{
-			"": Attributes{
-				"Manifest-Version: 1.0",
-				"Created-By: 1.0 (Android SignApk)",
-			},
-		}, nil
-	}
-	fr, err := rawManifest.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer fr.Close()
-	return ParseManifest(fr)
-}
-
-// isSpecialIgnored returns true if name is one of the special paths that
-// should not be taken into account when calculating a hash/signature of an
-// .apk file. Coincidentally, those same files also should not be copied
-// verbatim to the output .apk file.
 func isSpecialIgnored(name string) bool {
 	if !strings.HasPrefix(name, "META-INF/") {
 		return false // small optimization
@@ -257,7 +201,7 @@ func isSpecialIgnored(name string) bool {
 		return m
 	}
 	// https://docs.oracle.com/javase/7/docs/technotes/guides/jar/jar.html#Signed_JAR_File
-	return name == pathManifest ||
+	return name == "META-INF/MANIFEST.MF" ||
 		match("META-INF/*.SF", name) ||
 		match("META-INF/*.RSA", name) ||
 		match("META-INF/*.DSA", name) ||
@@ -265,57 +209,26 @@ func isSpecialIgnored(name string) bool {
 		match("META-INF/SIG-*", name)
 }
 
-func writeSignatureFile(w io.Writer, manifest Manifest, sortedFiles []*zip.File) (err error) {
-	w = &wrap72{Writer: w}
-	write := func(s string) {
-		if err == nil {
-			_, err = w.Write([]byte(s))
-		}
-	}
-	write("Signature-Version: 1.0\r\n")
-	write("Created-By: 1.0 (Android SignApk)\r\n")
+func sign(data []byte, cert *x509.Certificate, privkey crypto.PrivateKey) ([]byte, error) {
+	algo, err := pkcs7.NewSignedData(data)
 	if err != nil {
-		return
+		return nil, err
 	}
-	hasher := sha1.New()
-	_, err = manifest.WriteTo(hasher)
+	err = algo.AddSigner(cert, privkey, pkcs7.SignerInfoConfig{})
 	if err != nil {
-		return
+		return nil, err
 	}
-	write("SHA1-Digest-Manifest: " + base64enc(hasher.Sum(nil)) + "\r\n\r\n")
+	algo.Detach()
+	signature, err := algo.Finish()
 	if err != nil {
-		return
+		return nil, err
 	}
-	for _, f := range sortedFiles {
-		if len(manifest[f.Name]) == 0 {
-			continue
-		}
-		hasher := sha1.New()
-		_, err = manifest.WriteEntry(hasher, f.Name)
-		if err != nil {
-			return
-		}
-		_, err = hasher.Write([]byte("\r\n"))
-		if err != nil {
-			return
-		}
-		write("Name: " + f.Name + "\r\n")
-		write("SHA1-Digest: " + base64enc(hasher.Sum(nil)) + "\r\n\r\n")
-		if err != nil {
-			return
-		}
-	}
-	return
+	return signature, err
 }
 
-// zipFind returns a file with specified name from r, or nil if not found.
-func zipFind(r *zip.Reader, name string) *zip.File {
-	for _, f := range r.File {
-		if f.Name == name {
-			return f
-		}
-	}
-	return nil
+func base64sha1(s string) string {
+	hash, _ := sha1sum(strings.NewReader(s))
+	return base64enc(hash[:])
 }
 
 func sha1sum(r io.Reader) (sum [sha1.Size]byte, err error) {
@@ -327,4 +240,16 @@ func sha1sum(r io.Reader) (sum [sha1.Size]byte, err error) {
 
 func base64enc(buf []byte) string {
 	return base64.StdEncoding.EncodeToString(buf)
+}
+
+func check(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func die(err error) {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	os.Exit(1)
 }
