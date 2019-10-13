@@ -2,5 +2,3 @@ github.com/kylelemons/godebug v0.0.0-20170820004349-d65d576e9348 h1:MtvEpTB6LX3v
 github.com/kylelemons/godebug v0.0.0-20170820004349-d65d576e9348/go.mod h1:B69LEHPfb2qLo0BaaOLcbitczOKLWTsrBG9LczfCD4k=
 go.mozilla.org/pkcs7 v0.0.0-20181213175627-3cffc6fbfe83 h1:PSzO8ElVoXR+5dqEObn1yvlz+yAcGUh9+6PllAGiJJg=
 go.mozilla.org/pkcs7 v0.0.0-20181213175627-3cffc6fbfe83/go.mod h1:5fWP3IVYEMc04wC+lMJAfkmNmKAl2P1swVv8VS+URZ8=
-golang.org/x/exp/errors v0.0.0-20190407012324-4f75125f75a3 h1:FDSHM5xezdqUWoHR6RYfs/QisGj4tb75Ix32Yu2o/AI=
-golang.org/x/exp/errors v0.0.0-20190407012324-4f75125f75a3/go.mod h1:YgqsNsAu4fTvlab/7uiYK9LJrCIzKg/NiZUIH1/ayqo=
