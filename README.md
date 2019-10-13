@@ -1,6 +1,6 @@
 basia
 =====
-A builder for android signed APK files that does not require Android Studio or JRE.
+A builder for Android signed APK files that does not require Android Studio or JRE.
 
 Usage
 -----
