@@ -1,15 +1,15 @@
-apksigner
-=========
-A lightweight APK signing tool that does not require Android Studio or JRE.
+basia
+=====
+A builder for android signed APK files that does not require Android Studio or JRE.
 
 Usage
 -----
 
-    $ git clone https://github.com/akavel/apksigner
-    $ cd apksigner
+    $ git clone https://github.com/akavel/basia
+    $ cd basia
     $ go build
 
-    $ ./apksigner -i unsigned.apk -k key.pk8 -c cert.x509.pem -o signed.apk
+    $ ./basia -i apk/ -c cert.x509.pem -k key.pk8 -o signed.apk
 
 License
 =======
